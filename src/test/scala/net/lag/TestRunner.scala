@@ -24,9 +24,10 @@ package net.lag
 
 import net.lag.configgy.Configgy
 import net.lag.logging.Logger
+import org.specs.runner.SpecsFileRunner
 
 
-object TestRunner extends FilterableSpecsFileRunner("src/test/scala/**/*.scala") {
+object TestRunner extends SpecsFileRunner("src/test/scala/**/*.scala", ".*Spec") {
 //  Configgy.configure("src/resources/test.conf")
   if (System.getProperty("debugtrace") == null) {
     Logger.get("").setLevel(Logger.FATAL)
