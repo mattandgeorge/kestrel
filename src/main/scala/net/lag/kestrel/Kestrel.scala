@@ -25,6 +25,7 @@ package net.lag.kestrel
 import java.net.InetSocketAddress
 import java.util.Properties
 import java.util.concurrent.{CountDownLatch, Executors, ExecutorService, TimeUnit}
+import java.util.concurrent.atomic.AtomicLong
 import scala.actors.{Actor, Scheduler}
 import scala.actors.Actor._
 import scala.collection.mutable
@@ -38,14 +39,14 @@ import net.lag.naggati.IoHandlerActorAdapter
 
 
 class Counter {
-  private var value: Long = 0
+  private var value = new AtomicLong(0)
 
-  def get = synchronized { value }
-  def set(n: Int) = synchronized { value = n }
-  def incr = synchronized { value += 1; value }
-  def incr(n: Int) = synchronized { value += n; value }
-  def decr = synchronized { value -= 1; value }
-  override def toString = synchronized { value.toString }
+  def get() = value.get
+  def set(n: Int) = value.set(n)
+  def incr = value.addAndGet(1)
+  def incr(n: Int) = value.addAndGet(n)
+  def decr = value.addAndGet(-1)
+  override def toString = value.get.toString
 }
 
 
@@ -56,6 +57,7 @@ object KestrelStats {
   val totalConnections = new Counter
   val getRequests = new Counter
   val setRequests = new Counter
+  val incrRequests = new Counter
   val sessionID = new Counter
 }
 

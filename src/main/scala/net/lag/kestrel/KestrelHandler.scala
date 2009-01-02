@@ -126,6 +126,13 @@ class KestrelHandler(val session: IoSession, val config: Config) extends Actor {
         session.write("Reloaded config.\r\n")
       case "FLUSH" =>
         flush(request.line(1))
+      case "INCR" =>
+        try {
+          incr(request.line(1), request.line(2).toInt)
+        } catch {
+          case e: NumberFormatException =>
+            throw new ProtocolError("bad request: " + request)
+        }
     }
   }
 
@@ -232,6 +239,11 @@ class KestrelHandler(val session: IoSession, val config: Config) extends Actor {
     writeResponse("END\r\n")
   }
 
+  private def incr(name: String, value: Int) = {
+    log.debug("incr -> id=%s", name)
+    KestrelStats.incrRequests.incr
+  }
+
   private def stats = {
     var report = new mutable.ArrayBuffer[(String, String)]
     report += (("uptime", Kestrel.uptime.toString))
@@ -244,6 +256,7 @@ class KestrelHandler(val session: IoSession, val config: Config) extends Actor {
     report += (("total_connections", KestrelStats.totalConnections.toString))
     report += (("cmd_get", KestrelStats.getRequests.toString))
     report += (("cmd_set", KestrelStats.setRequests.toString))
+    report += (("cmd_incr", KestrelStats.incrRequests.toString))
     report += (("get_hits", Kestrel.queues.queueHits.toString))
     report += (("get_misses", Kestrel.queues.queueMisses.toString))
     report += (("bytes_read", KestrelStats.bytesRead.toString))
