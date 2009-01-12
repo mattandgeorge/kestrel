@@ -22,12 +22,12 @@
 
 package net.lag.kestrel
 
-import java.net.InetSocketAddress
-import java.util.Properties
+import java.net.{InetAddress, InetSocketAddress, InterfaceAddress, NetworkInterface}
 import java.util.concurrent.{CountDownLatch, Executors, ExecutorService, TimeUnit}
 import java.util.concurrent.atomic.AtomicLong
 import scala.actors.{Actor, Scheduler}
 import scala.actors.Actor._
+import scala.collection.jcl
 import scala.collection.mutable
 import org.apache.mina.core.session.IoSession
 import org.apache.mina.filter.codec.ProtocolCodecFilter
@@ -76,13 +76,19 @@ object Kestrel {
 
   private val deathSwitch = new CountDownLatch(1)
 
+  var _clusterIndex: Option[Int] = None
+  private val clusterConfigured = new CountDownLatch(1)
+  def clusterIndex = { clusterConfigured.await; _clusterIndex }
+
+  val DEFAULT_PORT = 22133
+
 
   def main(args: Array[String]): Unit = {
     runtime.load(args)
     startup(Configgy.config)
   }
 
-  def configure(c: Option[ConfigMap]) = {
+  def configure(c: Option[ConfigMap]): Unit = {
     for (config <- c) {
       PersistentQueue.maxJournalSize = config.getInt("max_journal_size", 16 * 1024 * 1024)
       PersistentQueue.maxMemorySize = config.getInt("max_memory_size", 128 * 1024 * 1024)
@@ -90,9 +96,9 @@ object Kestrel {
     }
   }
 
-  def startup(config: Config) = {
+  def startup(config: Config): Unit = {
     val listenAddress = config.getString("host", "0.0.0.0")
-    val listenPort = config.getInt("port", 22122)
+    val listenPort = config.getInt("port", DEFAULT_PORT)
     queues = new QueueCollection(config.getString("queue_path", "/tmp"), config.configMap("queues"))
     configure(Some(config))
     config.subscribe(configure _)
@@ -109,25 +115,63 @@ object Kestrel {
     acceptor.setHandler(new IoHandlerActorAdapter((session: IoSession) => new KestrelHandler(session, config)))
     acceptor.bind(new InetSocketAddress(listenAddress, listenPort))
 
+    val localAddress = acceptor.getLocalAddress()
+    configureCluster(config, localAddress.getAddress(), localAddress.getPort())
+
     log.info("Kestrel started.")
 
-    // make sure there's always one actor running so scala 272rc6 doesn't kill off the actors library.
+    // make sure there's always one actor running so scala 2.7.2 doesn't kill off the actors library.
     actor {
       deathSwitch.await
     }
   }
 
-  def shutdown = {
+  def shutdown(): Unit = {
     log.info("Shutting down!")
     queues.shutdown
     acceptor.unbind
     acceptor.dispose
     Scheduler.shutdown
     acceptorExecutor.shutdown
-    // the line below causes a 1s pause in unit tests. :(
-    acceptorExecutor.awaitTermination(5, TimeUnit.SECONDS)
+    // the line below causes a 1 second pause in unit tests. :(
+    //acceptorExecutor.awaitTermination(5, TimeUnit.SECONDS)
     deathSwitch.countDown
   }
 
-  def uptime = (Time.now - _startTime) / 1000
+  def uptime() = (Time.now - _startTime) / 1000
+
+  // if a cluster is defined, figure out where i am in it.
+  def configureCluster(config: ConfigMap, myAddress: InetAddress, myPort: Int): Unit = {
+    case class ClusterMember(hosts: List[InetAddress], port: Int)
+
+    val cluster = config.getList("cluster").toList
+
+    // build up a List[ClusterMember] of addr/ports for the cluster members.
+    val members = cluster map { desc =>
+      val segments = desc.split(":", 2)
+      val addrList = InetAddress.getAllByName(segments(0)).toList
+      ClusterMember(addrList, if (segments.length == 2) segments(1).toInt else DEFAULT_PORT)
+    }
+    log.debug("Cluster expands to: %s",
+              members.map(m => "%s (%d)".format(m.hosts.mkString(","), m.port)).mkString("; "))
+
+    var locals = new mutable.ListBuffer[InetAddress]
+    if (myAddress.isAnyLocalAddress()) {
+      // assemble a list of local addresses.
+      val ifaces = NetworkInterface.getNetworkInterfaces()
+      while (ifaces.hasMoreElements) {
+        locals ++= jcl.Buffer(ifaces.nextElement().getInterfaceAddresses()).map(_.getAddress())
+      }
+    } else {
+      locals += myAddress
+    }
+
+    _clusterIndex = members.zipWithIndex.filter { m =>
+      (m._1.port == myPort) && (m._1.hosts.exists(locals contains _))
+    }.map(_._2).firstOption
+    if (_clusterIndex.isDefined) {
+      log.info("In a cluster of %d, I am #%d.", cluster.size, _clusterIndex.get + 1)
+    }
+    clusterConfigured.countDown
+  }
 }
