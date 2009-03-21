@@ -5,18 +5,36 @@
 
 QUEUE_PATH="/var/spool/kestrel"
 KESTREL_HOME="/usr/local/kestrel"
-AS_USER="daemon"
+AS_USER="root"	# Probably want to create a special user..
+AS_GROUP="daemon"
 VERSION="1.0"
-DAEMON="/usr/local/bin/daemon"
-
-daemon_args="--name kestrel --pidfile /var/run/kestrel.pid"
+PID_FILE="/var/run/kestrel.pid"
+LOG_FILE="/var/log/kestrel/kestrel.log"
+OUT_FILE="/var/log/kestrel/kestrel.out"
 HEAP_OPTS="-Xmx2048m -Xms1024m -XX:NewSize=256m"
 # -Dcom.sun.management.jmxremote -Dcom.sun.management.jmxremote.port=9999 -Dcom.sun.management.jmxremote.authenticate=false -Dcom.sun.management.jmxremote.ssl=false 
-JAVA_OPTS="-server -verbosegc -XX:+PrintGCDetails -XX:+UseConcMarkSweepGC -XX:+UseParNewGC $HEAP_OPTS"
+JAVA_OPTS="-XX:+PrintGCDetails -XX:+UseConcMarkSweepGC -XX:+UseParNewGC $HEAP_OPTS"
 
+# Makes the file $1 writable by the group $AS_GROUP.
+function make_file_writable() {
+   local filename="$1"
+   touch $filename || return 1
+   chgrp $AS_GROUP $filename || return 1
+   chmod g+w $filename || return 1
+   return 0
+}
 
 function running() {
-  $DAEMON $daemon_args --running
+	if [ -r $PID_FILE ]; then
+		pid="$(<$PID_FILE)"
+		if [ ! -z "$pid" ]; then
+			local running=`ps -x $pid | awk '{print $1}' | grep $pid`
+			if [ ! -z "$running" ]; then
+				return 0
+			fi
+		fi
+	fi	
+	return 1
 }
 
 function find_java() {
@@ -47,7 +65,7 @@ find_java
 
 case "$1" in
   start)
-    echo -n "Starting kestrel... "
+    printf "Starting kestrel... "
 
     if [ ! -r $KESTREL_HOME/kestrel-$VERSION.jar ]; then
       echo "FAIL"
@@ -63,9 +81,37 @@ case "$1" in
       echo "already running."
       exit 0
     fi
-    
+
+		rm -f $PID_FILE
+		
+    if ! make_file_writable $PID_FILE; then
+			echo "Could not create $PID_FILE"
+			echo "FAIL"
+      exit 1
+		fi
+		
+		if ! make_file_writable $LOG_FILE; then
+			echo "Could not create $LOG_FILE"
+			echo "FAIL"
+      exit 1
+		fi
+		
+		if ! make_file_writable $OUT_FILE; then
+			echo "Could not create $OUT_FILE"
+			echo "FAIL"
+      exit 1
+		fi
+	
     ulimit -n 8192 || echo -n " (no ulimit)"
-    $DAEMON $daemon_args --user $AS_USER --stdout=/var/log/kestrel/stdout --stderr=/var/log/kestrel/error -- ${JAVA_HOME}/bin/java ${JAVA_OPTS} -jar ${KESTREL_HOME}/kestrel-${VERSION}.jar
+
+		# Build the start up command
+		java_cmd="${JAVA_HOME}/bin/java ${JAVA_OPTS} -server -verbosegc -jar ${KESTREL_HOME}/kestrel-${VERSION}.jar"
+		cmd="nohup $java_cmd >>$OUT_FILE 2>&1 & echo \$! >$PID_FILE"
+		#echo "cmd=$cmd"
+		
+		# Start up
+		sudo -u $AS_USER $SHELL -c "$cmd"
+
     tries=0
     while ! running; do
       tries=$((tries + 1))
@@ -79,7 +125,7 @@ case "$1" in
   ;;
 
   stop)
-    echo -n "Stopping kestrel... "
+    printf "Stopping kestrel... "
     if ! running; then
       echo "wasn't running."
       exit 0
